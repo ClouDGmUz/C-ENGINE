@@ -1,0 +1,11 @@
+build/
+out.txt
+err.txt
+debug.log
+imgui.ini
+*.exe
+*.pdb
+*.obj
+*.ilk
+.vs/
+CMakeSettings.json
