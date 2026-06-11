@@ -71,7 +71,8 @@ struct Renderer {
     VkDeviceMemory      sky_vm[MAX_FRAMES_IN_FLIGHT];
     void               *sky_mapped[MAX_FRAMES_IN_FLIGHT];
 
-    /* gizmo: 3 axes x (billboard shaft quad 6 + arrowhead 3) = 27 verts */
+    /* gizmo: arrows (move/scale) or 48-segment rings (rotate).
+       Worst case 3 axes x 48 seg x 6 verts = 864; buffer holds 1024. */
     VkBuffer            gizmo_vb[MAX_FRAMES_IN_FLIGHT];
     VkDeviceMemory      gizmo_vm[MAX_FRAMES_IN_FLIGHT];
     void               *gizmo_mapped[MAX_FRAMES_IN_FLIGHT];

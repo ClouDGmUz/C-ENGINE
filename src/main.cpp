@@ -117,7 +117,8 @@ static GizmoAxis g_dragging = GIZMO_NONE;
 static glm::vec3 g_drag_start_pos;
 static float     g_drag_start_scale;
 static float     g_drag_start_rot[3];
-static float     g_drag_last_t;  // last projected value along axis
+static float     g_drag_last_t;     // last projected value along axis (move/scale)
+static float     g_drag_last_angle; // last ring angle (rotate)
 
 /* ─── Undo system ─── */
 struct UndoEntry {
@@ -195,6 +196,24 @@ static float ray_project_on_axis(glm::vec3 ro, glm::vec3 rd, glm::vec3 origin, g
     if (fabsf(denom) < 1e-6f) return 0.0f;
     float s = (b * d - a * e) / denom;
     return s; // parameter along axis from origin
+}
+
+// Intersect the pick ray with the plane through 'c' perpendicular to 'n'.
+// Outputs the polar angle (right-handed about n) and radius of the hit —
+// used by the Blender-style rotation rings.
+static bool axis_plane_angle(glm::vec3 ro, glm::vec3 rd, glm::vec3 c, glm::vec3 n,
+                             float &angle, float &radius) {
+    float dn = glm::dot(rd, n);
+    if (fabsf(dn) < 1e-5f) return false; // ray parallel to the ring plane
+    float t = glm::dot(c - ro, n) / dn;
+    if (t <= 0.0f) return false;         // plane behind the camera
+    glm::vec3 hp = ro + rd * t - c;
+    glm::vec3 u = fabsf(n.y) < 0.9f ? glm::normalize(glm::cross(n, glm::vec3(0,1,0)))
+                                    : glm::normalize(glm::cross(n, glm::vec3(1,0,0)));
+    glm::vec3 v = glm::cross(n, u);
+    radius = glm::length(hp);
+    angle  = atan2f(glm::dot(hp, v), glm::dot(hp, u));
+    return true;
 }
 
 static void mouse_button_cb(GLFWwindow *w, int button, int action, int) {
@@ -345,22 +364,37 @@ int main(int argc, char **argv) {
         glm::vec3 ray_dir = screen_to_ray(mx, my, win_w, win_h, view, proj);
         glm::vec3 ray_origin = g_cam.pos;
 
-        // Gizmo hover detection — hit targets match the drawn billboard arrows.
-        // All three axes are tested and the NEAREST one wins, so clicks land
-        // on the arrow under the cursor instead of favoring X then Y then Z.
-        float gizmo_len = (g_tool == TOOL_SCALE) ? 0.8f : 1.2f;
+        // Gizmo hover detection — hit targets match the drawn gizmo, which is
+        // sized by camera distance (constant on screen, Blender-style). All
+        // axes are tested and the NEAREST one wins.
+        const glm::vec3 axes[3] = { {1,0,0}, {0,1,0}, {0,0,1} };
         g_hovered = GIZMO_NONE;
         if (mouse_in_viewport && selected_obj >= 0 && selected_obj < (int)objects.size() && g_dragging == GIZMO_NONE) {
             glm::vec3 obj_pos(objects[selected_obj].pos[0], objects[selected_obj].pos[1], objects[selected_obj].pos[2]);
             float gdist = glm::length(g_cam.pos - obj_pos);
+            // size formulas mirror renderer_draw_gizmo
+            float gizmo_len = glm::clamp(gdist * 0.25f, 0.35f, 6.0f);
+            if (g_tool == TOOL_SCALE) gizmo_len *= 0.8f;
             float shaft_w = glm::clamp(gdist * 0.006f, 0.008f, 0.06f);
-            float hit_r = shaft_w * 2.5f;            // arrow width + small grace zone
-            float hit_l = gizmo_len + shaft_w * 9.0f; // include the arrowhead
-            float best = hit_r;
-            const glm::vec3 axes[3] = { {1,0,0}, {0,1,0}, {0,0,1} };
-            for (int a = 0; a < 3; a++) {
-                float dist = ray_axis_dist(ray_origin, ray_dir, obj_pos, axes[a], hit_l);
-                if (dist < best) { best = dist; g_hovered = (GizmoAxis)(GIZMO_X + a); }
+
+            if (g_tool == TOOL_ROTATE) {
+                // nearest ring: ray-plane hit whose radius is closest to the ring's
+                float best = shaft_w * 4.0f; // band + grace zone
+                for (int a = 0; a < 3; a++) {
+                    float ang, rad;
+                    if (axis_plane_angle(ray_origin, ray_dir, obj_pos, axes[a], ang, rad)) {
+                        float d = fabsf(rad - gizmo_len);
+                        if (d < best) { best = d; g_hovered = (GizmoAxis)(GIZMO_X + a); }
+                    }
+                }
+            } else {
+                float hit_r = shaft_w * 2.5f;            // arrow width + small grace zone
+                float hit_l = gizmo_len + shaft_w * 9.0f; // include the tip
+                float best = hit_r;
+                for (int a = 0; a < 3; a++) {
+                    float dist = ray_axis_dist(ray_origin, ray_dir, obj_pos, axes[a], hit_l);
+                    if (dist < best) { best = dist; g_hovered = (GizmoAxis)(GIZMO_X + a); }
+                }
             }
         }
 
@@ -374,12 +408,13 @@ int main(int argc, char **argv) {
                 g_drag_start_rot[1] = objects[selected_obj].rotation[1];
                 g_drag_start_rot[2] = objects[selected_obj].rotation[2];
 
-                // Compute initial projection along axis
-                glm::vec3 axis(0);
-                if (g_dragging == GIZMO_X) axis = {1,0,0};
-                if (g_dragging == GIZMO_Y) axis = {0,1,0};
-                if (g_dragging == GIZMO_Z) axis = {0,0,1};
-                g_drag_last_t = ray_project_on_axis(ray_origin, ray_dir, g_drag_start_pos, axis);
+                glm::vec3 axis = axes[g_dragging - GIZMO_X];
+                if (g_tool == TOOL_ROTATE) {
+                    float rad;
+                    axis_plane_angle(ray_origin, ray_dir, g_drag_start_pos, axis, g_drag_last_angle, rad);
+                } else {
+                    g_drag_last_t = ray_project_on_axis(ray_origin, ray_dir, g_drag_start_pos, axis);
+                }
             } else {
                 // Pick object by ray-sphere intersection
                 float best_t = 1e30f;
@@ -396,32 +431,36 @@ int main(int argc, char **argv) {
             }
         }
 
-        // Dragging: move or scale along axis using ray-axis projection
+        // Dragging: move/scale via ray-axis projection, rotate via ring angle
         if (g_dragging != GIZMO_NONE && selected_obj >= 0 && selected_obj < (int)objects.size()) {
-            glm::vec3 axis(0);
-            if (g_dragging == GIZMO_X) axis = {1,0,0};
-            if (g_dragging == GIZMO_Y) axis = {0,1,0};
-            if (g_dragging == GIZMO_Z) axis = {0,0,1};
+            int ai = g_dragging - GIZMO_X;
+            glm::vec3 axis = axes[ai];
 
-            // Project current ray onto the axis
-            glm::vec3 current_obj_pos(objects[selected_obj].pos[0], objects[selected_obj].pos[1], objects[selected_obj].pos[2]);
-            float current_t = ray_project_on_axis(ray_origin, ray_dir, g_drag_start_pos, axis);
-            float delta = current_t - g_drag_last_t;
+            if (g_tool == TOOL_ROTATE) {
+                // angular delta in the ring plane, like turning a dial
+                float ang, rad;
+                if (axis_plane_angle(ray_origin, ray_dir, g_drag_start_pos, axis, ang, rad)) {
+                    float d = ang - g_drag_last_angle;
+                    const float PI_F = 3.14159265f;
+                    while (d >  PI_F) d -= 2.0f * PI_F;
+                    while (d < -PI_F) d += 2.0f * PI_F;
+                    objects[selected_obj].rotation[ai] += d;
+                    g_drag_last_angle = ang;
+                }
+            } else {
+                float current_t = ray_project_on_axis(ray_origin, ray_dir, g_drag_start_pos, axis);
+                float delta = current_t - g_drag_last_t;
 
-            if (g_tool == TOOL_MOVE) {
-                objects[selected_obj].pos[0] += axis.x * delta;
-                objects[selected_obj].pos[1] += axis.y * delta;
-                objects[selected_obj].pos[2] += axis.z * delta;
-            } else if (g_tool == TOOL_SCALE) {
-                objects[selected_obj].scale += delta;
-                if (objects[selected_obj].scale < 0.01f) objects[selected_obj].scale = 0.01f;
-            } else if (g_tool == TOOL_ROTATE) {
-                float angle = delta * 2.0f;
-                if (g_dragging == GIZMO_X) objects[selected_obj].rotation[0] += angle;
-                if (g_dragging == GIZMO_Y) objects[selected_obj].rotation[1] += angle;
-                if (g_dragging == GIZMO_Z) objects[selected_obj].rotation[2] += angle;
+                if (g_tool == TOOL_MOVE) {
+                    objects[selected_obj].pos[0] += axis.x * delta;
+                    objects[selected_obj].pos[1] += axis.y * delta;
+                    objects[selected_obj].pos[2] += axis.z * delta;
+                } else { // TOOL_SCALE
+                    objects[selected_obj].scale += delta;
+                    if (objects[selected_obj].scale < 0.01f) objects[selected_obj].scale = 0.01f;
+                }
+                g_drag_last_t = current_t;
             }
-            g_drag_last_t = current_t;
         }
 
         // Release drag — push undo when transform ends

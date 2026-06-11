@@ -229,8 +229,8 @@ Renderer *renderer_create(const VkCtx &ctx) {
         create_buffer(ctx, 3 * sizeof(Vertex), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, r->sky_vb[f], r->sky_vm[f]);
         vkMapMemory(ctx.device, r->sky_vm[f], 0, 3 * sizeof(Vertex), 0, &r->sky_mapped[f]);
 
-        create_buffer(ctx, 27 * sizeof(Vertex), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, r->gizmo_vb[f], r->gizmo_vm[f]);
-        vkMapMemory(ctx.device, r->gizmo_vm[f], 0, 27 * sizeof(Vertex), 0, &r->gizmo_mapped[f]);
+        create_buffer(ctx, 1024 * sizeof(Vertex), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, r->gizmo_vb[f], r->gizmo_vm[f]);
+        vkMapMemory(ctx.device, r->gizmo_vm[f], 0, 1024 * sizeof(Vertex), 0, &r->gizmo_mapped[f]);
 
         create_buffer(ctx, sizeof(SceneUBO), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, r->ubo_buffer[f], r->ubo_memory[f]);
         vkMapMemory(ctx.device, r->ubo_memory[f], 0, sizeof(SceneUBO), 0, &r->ubo_mapped[f]);
@@ -837,7 +837,6 @@ void renderer_draw_gizmo(Renderer *r, const VkCtx &ctx, uint32_t frame_index,
                          VkCommandBuffer cmd,
                          const glm::mat4 &view, const glm::mat4 &proj,
                          const SceneObject &obj, ToolMode tool, GizmoAxis highlight) {
-    float len = (tool == TOOL_SCALE) ? 0.8f : 1.2f;
     glm::vec3 o(obj.pos[0], obj.pos[1], obj.pos[2]);
     glm::vec3 cam(r->cam_pos[0], r->cam_pos[1], r->cam_pos[2]);
     glm::vec3 to_cam = cam - o;
@@ -845,22 +844,52 @@ void renderer_draw_gizmo(Renderer *r, const VkCtx &ctx, uint32_t frame_index,
     if (dist < 1e-4f) return;
     glm::vec3 vdir = to_cam / dist;
 
-    /* shaft width scales with distance -> roughly constant on screen */
+    /* Blender-style: everything scales with camera distance so the gizmo
+       keeps a constant size on screen. MUST match the hit test in main.cpp. */
+    float len = glm::clamp(dist * 0.25f, 0.35f, 6.0f);
+    if (tool == TOOL_SCALE) len *= 0.8f;
     float w      = glm::clamp(dist * 0.006f, 0.008f, 0.06f);
     float head_w = w * 3.2f;
     float head_l = w * 9.0f;
 
     const glm::vec3 axes[3] = { {1,0,0}, {0,1,0}, {0,0,1} };
-    Vertex gv[27];
+    static Vertex gv[1024];
     int n = 0;
+    glm::vec3 cur_col(1.0f);
+    auto put = [&](glm::vec3 p) {
+        if (n < 1024)
+            gv[n++] = { p.x, p.y, p.z, cur_col.r, cur_col.g, cur_col.b, 0, 1, 0, 0, 0 };
+    };
 
     for (int a = 0; a < 3; a++) {
         glm::vec3 axis = axes[a];
         bool hot = (highlight == GIZMO_X + a);
         float b = hot ? 1.0f : 0.75f;
         /* axis colors: X red, Y green, Z blue; hot axis pulls toward white */
-        glm::vec3 col = axis * b;
-        if (hot) col += glm::vec3(0.35f);
+        cur_col = axis * b;
+        if (hot) cur_col += glm::vec3(0.35f);
+
+        if (tool == TOOL_ROTATE) {
+            /* rotation ring: flat washer in the plane perpendicular to the
+               axis, like Blender's rotate gizmo */
+            glm::vec3 u = glm::abs(axis.y) < 0.9f
+                        ? glm::normalize(glm::cross(axis, glm::vec3(0,1,0)))
+                        : glm::normalize(glm::cross(axis, glm::vec3(1,0,0)));
+            glm::vec3 v = glm::cross(axis, u);
+            const int SEG = 48;
+            float band = w * 1.4f;
+            for (int s = 0; s < SEG; s++) {
+                float a0 = 2.0f * PI * s / SEG;
+                float a1 = 2.0f * PI * (s + 1) / SEG;
+                glm::vec3 d0 = u * cosf(a0) + v * sinf(a0);
+                glm::vec3 d1 = u * cosf(a1) + v * sinf(a1);
+                glm::vec3 i0 = o + d0 * (len - band), o0 = o + d0 * (len + band);
+                glm::vec3 i1 = o + d1 * (len - band), o1 = o + d1 * (len + band);
+                put(i0); put(o0); put(o1);
+                put(i0); put(o1); put(i1);
+            }
+            continue;
+        }
 
         /* billboard: expand the shaft perpendicular to both axis and view */
         glm::vec3 side = glm::cross(axis, vdir);
@@ -875,15 +904,20 @@ void renderer_draw_gizmo(Renderer *r, const VkCtx &ctx, uint32_t frame_index,
 
         glm::vec3 tip = o + axis * len;
         glm::vec3 s = side * w;
-        auto put = [&](glm::vec3 p) {
-            gv[n++] = { p.x, p.y, p.z, col.r, col.g, col.b, 0, 1, 0, 0, 0 };
-        };
         /* shaft quad (two tris) */
         put(o - s); put(tip - s); put(tip + s);
         put(o - s); put(tip + s); put(o + s);
-        /* arrowhead tri (square tip for scale tool reads as a block) */
+
         glm::vec3 hs = side * head_w;
-        put(tip - hs); put(tip + hs); put(tip + axis * head_l);
+        if (tool == TOOL_SCALE) {
+            /* square block tip, Blender's scale handle */
+            glm::vec3 t2 = tip + axis * head_l;
+            put(tip - hs); put(t2 - hs); put(t2 + hs);
+            put(tip - hs); put(t2 + hs); put(tip + hs);
+        } else {
+            /* arrowhead tri */
+            put(tip - hs); put(tip + hs); put(tip + axis * head_l);
+        }
     }
 
     memcpy(r->gizmo_mapped[frame_index], gv, n * sizeof(Vertex));
