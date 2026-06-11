@@ -12,11 +12,19 @@ struct SceneObject {
     float     pos[3];
     float     rotation[3]; // euler angles in radians
     float     scale;
-    int       tex_mode;    // 0=none, 1=checker, 2=brick, 3=marble, 4=wood
+    int       tex_mode;    // 0=none,1=checker,2=brick,3=marble,4=wood,5=noise,6=voronoi,7=wave,8=gradient,9=musgrave
     /* PBR material */
     float     color[3];    // albedo
     float     roughness;   // 0..1
     float     metallic;    // 0..1
+    /* Blender principled extras */
+    float     clearcoat;
+    float     clearcoat_roughness;
+    float     sheen;
+    /* Blender texture parameters */
+    int       tex_subtype;  // voronoi feature/metric, wave type/profile, gradient type, musgrave type
+    float     tex_param_a;  // voronoi smoothness, wave distortion, noise detail
+    float     tex_param_b;  // wave dscale, noise roughness
 };
 
 /* Tool modes for gizmo */

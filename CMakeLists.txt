@@ -79,9 +79,9 @@ set(VERT_H ${SHADER_GEN_DIR}/vert_spv.h)
 set(FRAG_H ${SHADER_GEN_DIR}/frag_spv.h)
 add_custom_command(
     OUTPUT ${VERT_H} ${FRAG_H}
-    DEPENDS ${SHADER_DIR}/shader.vert ${SHADER_DIR}/shader.frag glslang-standalone
-    COMMAND $<TARGET_FILE:glslang-standalone> -V ${SHADER_DIR}/shader.vert --variable-name vert_spv -o ${VERT_H}
-    COMMAND $<TARGET_FILE:glslang-standalone> -V ${SHADER_DIR}/shader.frag --variable-name frag_spv -o ${FRAG_H}
+    DEPENDS ${SHADER_DIR}/shader.vert ${SHADER_DIR}/shader.frag ${SHADER_DIR}/textures.glsl glslang-standalone
+    COMMAND $<TARGET_FILE:glslang-standalone> -V -I${SHADER_DIR} ${SHADER_DIR}/shader.vert --variable-name vert_spv -o ${VERT_H}
+    COMMAND $<TARGET_FILE:glslang-standalone> -V -I${SHADER_DIR} ${SHADER_DIR}/shader.frag --variable-name frag_spv -o ${FRAG_H}
     COMMENT "Compiling GLSL shaders -> SPIR-V headers"
 )
 

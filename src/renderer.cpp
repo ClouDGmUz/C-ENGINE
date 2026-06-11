@@ -31,10 +31,16 @@ struct SceneUBO {
 
 /* per-draw fragment push constants (offset 128), must match shader.frag PC */
 struct FragPC {
-    int32_t mode;       // render_mode + tex_mode * 16
+    int32_t mode;
     float   albedo[3];
     float   roughness;
     float   metallic;
+    float   clearcoat;
+    float   clearcoat_roughness;
+    float   sheen;
+    int32_t tex_subtype;
+    float   tex_param_a;
+    float   tex_param_b;
 };
 
 static VkShaderModule create_shader(const VkCtx &ctx, const uint32_t *code, size_t size) {
@@ -790,6 +796,12 @@ void renderer_draw(Renderer *r, const VkCtx &ctx, uint32_t frame_index,
             obj_fpc.albedo[2] = obj.color[2];
             obj_fpc.roughness = obj.roughness;
             obj_fpc.metallic  = obj.metallic;
+            obj_fpc.clearcoat = obj.clearcoat;
+            obj_fpc.clearcoat_roughness = obj.clearcoat_roughness;
+            obj_fpc.sheen = obj.sheen;
+            obj_fpc.tex_subtype = obj.tex_subtype;
+            obj_fpc.tex_param_a = obj.tex_param_a;
+            obj_fpc.tex_param_b = obj.tex_param_b;
 
             vkCmdPushConstants(cmd, r->pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, 64, glm::value_ptr(mvp));
             vkCmdPushConstants(cmd, r->pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT, 64, 64, glm::value_ptr(model));

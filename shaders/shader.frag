@@ -1,4 +1,9 @@
 #version 450
+#extension GL_GOOGLE_include_directive : enable
+#include "textures.glsl"
+
+const float PI = 3.14159265359;
+
 layout(location = 0) in vec3 vColor;
 layout(location = 1) in vec3 vNormal;
 layout(location = 2) in vec3 vPos;
@@ -8,7 +13,9 @@ layout(location = 0) out vec4 fColor;
 
 /* Per-draw material. mode = render_mode + tex_mode * 16.
    Render modes: 0 flat albedo (wireframe), 1 solid studio, 2 PBR,
-   3 ground grid, 4 outline, 5 physical sky, 6 x-ray, 7 flat vertex color. */
+   3 ground grid, 4 outline, 5 physical sky, 6 x-ray, 7 flat vertex color.
+   Texture modes: 0 none, 1 checker, 2 brick, 3 marble, 4 wood,
+   5 FBM noise, 6 voronoi, 7 wave, 8 gradient, 9 musgrave. */
 layout(push_constant) uniform PC {
     layout(offset = 128) int mode;
     float albedo_r;
@@ -16,6 +23,12 @@ layout(push_constant) uniform PC {
     float albedo_b;
     float roughness;
     float metallic;
+    float clearcoat;
+    float clearcoat_roughness;
+    float sheen;
+    int   tex_subtype;  // voronoi feature/distance, wave type/profile, gradient type, musgrave type
+    float tex_param_a;  // voronoi smoothness, wave distortion, noise detail
+    float tex_param_b;  // wave dscale, noise roughness, gradient unused
 } pc;
 
 layout(set = 0, binding = 0) uniform Scene {
@@ -32,29 +45,10 @@ layout(set = 0, binding = 0) uniform Scene {
 } ubo;
 layout(set = 0, binding = 1) uniform sampler2DShadow shadow_map;
 
-const float PI = 3.14159265359;
-
-// --- Noise helpers ---
-float hash(vec2 p) {
-    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
-}
-
-float noise(vec2 p) {
-    vec2 i = floor(p);
-    vec2 f = fract(p);
-    f = f * f * (3.0 - 2.0 * f);
-    return mix(mix(hash(i), hash(i + vec2(1,0)), f.x),
-               mix(hash(i + vec2(0,1)), hash(i + vec2(1,1)), f.x), f.y);
-}
-
-float fbm(vec2 p) {
-    float v = 0.0;
-    v += noise(p) * 0.5;
-    v += noise(p * 2.0) * 0.25;
-    v += noise(p * 4.0) * 0.125;
-    v += noise(p * 8.0) * 0.0625;
-    return v;
-}
+// --- Legacy noise/texture helpers (kept for cloud rendering) ---
+float hash(vec2 p) { return noise_hash2(p); }
+float noise(vec2 p) { return snoise_2d(p) * 0.5 + 0.5; }
+float fbm(vec2 p) { return noise_fbm(vec3(p, 0.0), 4.0, 0.5, 2.0, true); }
 
 // --- Procedural textures ---
 vec3 tex_checker(vec2 uv) {
@@ -91,22 +85,71 @@ vec3 tex_wood(vec2 uv) {
     return mix(light_wood, dark_wood, ring * 0.7 + n * 0.3);
 }
 
-// --- GGX/PBR helpers ---
+// --- Blender procedural textures (3D position-based) ---
+vec3 tex_noise_fbm(vec3 p) {
+    float detail = max(pc.tex_param_a, 1.0);
+    float roughness = max(pc.tex_param_b, 0.01);
+    float v = noise_fbm(p, detail, roughness, 2.0, true);
+    return vec3(v);
+}
+vec3 tex_voronoi(vec3 p) {
+    float smoothness = pc.tex_param_a;
+    int feature = pc.tex_subtype % 10;
+    int metric = (pc.tex_subtype / 10) % 10;
+    float v = voronoi(p * 2.0, smoothness, feature, metric, max(pc.tex_param_b, 0.5));
+    return mix(vec3(0.1, 0.1, 0.35), vec3(0.95, 0.9, 0.5), v * 1.2);
+}
+vec3 tex_wave(vec3 p) {
+    int wave_type = pc.tex_subtype % 10;
+    int dir = (pc.tex_subtype / 10) % 10;
+    int profile = (pc.tex_subtype / 100) % 10;
+    float v = wave_texture(p * 0.5, wave_type, dir, dir, profile, pc.tex_param_a, max(pc.tex_param_b, 0.0), 1.0, 0.5, 0.0);
+    return mix(vec3(0.35, 0.2, 0.6), vec3(0.9, 0.85, 0.4), v);
+}
+vec3 tex_gradient(vec3 p) {
+    float v = clamp(gradient_texture(p, pc.tex_subtype), 0.0, 1.0);
+    return mix(vec3(0.15, 0.1, 0.4), vec3(1.0, 0.6, 0.1), v);
+}
+vec3 tex_musgrave(vec3 p) {
+    int t = pc.tex_subtype % 10;
+    float d = max(pc.tex_param_a, 1.0), r = max(pc.tex_param_b, 0.01);
+    float v;
+    if (t == 0)      v = noise_fbm(p, d, r, 2.0, true);
+    else if (t == 1) v = noise_multi_fractal(p, d, r, 2.0);
+    else if (t == 2) v = noise_hetero_terrain(p, d, r, 2.0, 1.0);
+    else if (t == 3) v = noise_hybrid_multi_fractal(p, d, r, 2.0, 0.7, 1.0);
+    else             v = noise_ridged_multi_fractal(p, d, r, 2.0, 1.0, 2.0);
+    v = v * 0.5 + 0.5;
+    return mix(vec3(0.1, 0.08, 0.05), vec3(0.9, 0.6, 0.25), clamp(v, 0.0, 1.0));
+}
+
+// --- Multi-scatter GGX (from Blender Cycles) ---
 float D_GGX(float NdotH, float roughness) {
     float a = roughness * roughness;
     float a2 = a * a;
     float d = (NdotH * NdotH) * (a2 - 1.0) + 1.0;
     return a2 / (PI * d * d + 0.0001);
 }
-float G_SchlickGGX(float NdotV, float roughness) {
-    float k = (roughness + 1.0) * (roughness + 1.0) / 8.0;
+float G1_GGX(float NdotV, float roughness) {
+    float a = roughness * roughness;
+    float k = a / 2.0;
     return NdotV / (NdotV * (1.0 - k) + k);
 }
 float G_Smith(float NdotV, float NdotL, float roughness) {
-    return G_SchlickGGX(NdotV, roughness) * G_SchlickGGX(NdotL, roughness);
+    return G1_GGX(NdotV, roughness) * G1_GGX(NdotL, roughness);
 }
 vec3 F_Schlick(float cosTheta, vec3 F0) {
     return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+}
+// Energy-preserving multi-scatter (Blender Cycles)
+float E_GGX(float mu, float roughness) {
+    float om = 1.0 - mu;
+    return 1.0 - om * om * om * om * om * roughness;
+}
+vec3 multi_scatter_energy(vec3 F0, float roughness, float NdotV) {
+    vec3 E_avg = F0 + (1.0 - F0) * roughness / 21.0;
+    float E_o = E_GGX(NdotV, roughness);
+    return E_o * E_avg / (vec3(1.0) - E_avg * (1.0 - E_o) + vec3(0.001));
 }
 
 // --- Shadow map sampling (9-tap Poisson PCF) ---
@@ -129,11 +172,30 @@ float sample_shadow() {
     return sum / 9.0;
 }
 
-// --- Exposure + ACES tonemap + gamma ---
+// --- AgX tonemapping (Blender's modern replacement for Filmic) ---
+// Based on Blender's AgX implementation
+vec3 agx_default_contrast(vec3 x) {
+    vec3 x2 = x * x;
+    vec3 x4 = x2 * x2;
+    return (x * (x * (x * (x * 3.55813 + x2 * (-5.45202)) + x4 * (9.38702 + x2 * (-2.78561))) + x4 * 1.42276) + 0.00732)
+         / (x * (x * (x * (x * 3.09571 + x2 * (-6.17747)) + x4 * (9.33712 + x2 * (-1.96244))) + x4 * 1.40963) + 0.00353);
+}
+vec3 agx_look(vec3 val, vec3 look) {
+    return val; // passthrough look — the contrast curve already does the heavy lifting
+}
+vec3 agx_eotf(vec3 x) {
+    return pow(clamp(x, 0.0, 1.0), vec3(1.0 / 2.4));
+}
 vec3 tonemap(vec3 c) {
     c *= ubo.cam.w;
-    c = c * (c * 2.51 + 0.03) / (c * (c * 2.43 + 0.59) + 0.14);
-    return pow(clamp(c, 0.0, 1.0), vec3(1.0 / 2.2));
+    // AgX: compress log2 signal then apply contrast curve
+    c = clamp(c, 1e-10, 1e10);
+    c = log2(c);
+    c = (c + 10.0) / 15.5; // normalize to ~0..1
+    c = clamp(c, -0.0001, 1.0001);
+    c = agx_default_contrast(c);
+    c = agx_look(c, vec3(0.5));
+    return agx_eotf(c);
 }
 
 // --- Fog: exponential extinction + single-scatter glow toward the sun ---
@@ -221,13 +283,19 @@ void main() {
 
     // Material albedo, tinted by optional procedural pattern
     vec3 albedo = vec3(pc.albedo_r, pc.albedo_g, pc.albedo_b);
+    vec3 tex_p = vec3(vUV * 2.0 - 1.0, 0.0); // UV→3D for Blender textures
     if      (tex_mode == 1) albedo *= tex_checker(vUV);
     else if (tex_mode == 2) albedo *= tex_brick(vUV);
     else if (tex_mode == 3) albedo *= tex_marble(vUV);
     else if (tex_mode == 4) albedo *= tex_wood(vUV);
+    else if (tex_mode == 5) albedo *= tex_noise_fbm(vPos);
+    else if (tex_mode == 6) albedo *= tex_voronoi(vPos);
+    else if (tex_mode == 7) albedo *= tex_wave(vPos);
+    else if (tex_mode == 8) albedo *= tex_gradient(vPos);
+    else if (tex_mode == 9) albedo *= tex_musgrave(vPos);
 
     if (render_mode == 2) {
-        // --- PBR: Cook-Torrance, metalness workflow ---
+        // --- Enhanced PBR: multi-scatter GGX + clear coat + sheen (Blender principled) ---
         vec3 L = normalize(ubo.sun.xyz);
         vec3 V = normalize(ubo.cam.xyz - vPos);
         vec3 H = normalize(L + V);
@@ -237,32 +305,60 @@ void main() {
         float NdotV = max(dot(N, V), 0.001);
         float NdotH = max(dot(N, H), 0.0);
         float HdotV = max(dot(H, V), 0.0);
+        float LdotH = max(dot(L, H), 0.0);
 
-        float rough = clamp(pc.roughness, 0.03, 1.0);
+        float rough = clamp(pc.roughness, 0.02, 1.0);
         float metal = clamp(pc.metallic, 0.0, 1.0);
         vec3 F0 = mix(vec3(0.04), albedo, metal);
 
+        // --- Base layer: multi-scatter GGX ---
         float D = D_GGX(NdotH, rough);
         float G = G_Smith(NdotV, NdotL, rough);
-        vec3 F = F_Schlick(HdotV, F0);
+        vec3  F = F_Schlick(HdotV, F0);
         vec3 specular = (D * G * F) / (4.0 * NdotV * NdotL + 0.0001);
+        vec3 energy = multi_scatter_energy(F0, rough, NdotV);
+        specular += (vec3(1.0) - F) * energy * D * G / (4.0 * NdotV * NdotL + 0.0001);
 
-        vec3 kD = (vec3(1.0) - F) * (1.0 - metal); // metals have no diffuse
+        vec3 kD = (vec3(1.0) - F) * (1.0 - metal);
         vec3 diffuse = kD * albedo / PI;
 
         float shadow = sample_shadow();
         vec3 direct = (diffuse + specular) * sunE * NdotL * shadow;
 
-        // hemispheric ambient sampled from the active sky model
+        // --- Sheen layer (velvet/fabric, from Blender principled) ---
+        float sheen_val = clamp(pc.sheen, 0.0, 1.0);
+        if (sheen_val > 0.001) {
+            float sheen_fresnel = pow(1.0 - NdotV, 5.0) * sheen_val;
+            vec3 sheen_col = mix(vec3(1.0), albedo, 0.5) * sheen_fresnel * 0.5 * sunE * NdotL * shadow;
+            direct += sheen_col;
+        }
+
+        // --- Clear coat layer (car paint, from Blender principled) ---
+        float cc = clamp(pc.clearcoat, 0.0, 1.0);
+        if (cc > 0.001) {
+            float cc_rough = clamp(pc.clearcoat_roughness, 0.02, 1.0);
+            float cc_ior = 1.5;
+            float cc_f0 = ((cc_ior - 1.0) / (cc_ior + 1.0));
+            cc_f0 *= cc_f0;
+            vec3 cc_F0 = vec3(cc_f0);
+            vec3 cc_F = F_Schlick(HdotV, cc_F0);
+            float cc_D = D_GGX(NdotH, cc_rough);
+            float cc_G = G_Smith(NdotV, NdotL, cc_rough);
+            vec3 cc_spec = (cc_D * cc_G * cc_F) / (4.0 * NdotV * NdotL + 0.0001);
+            float cc_ndl = max(dot(N, L), 0.0);
+            direct = mix(direct, direct + cc_spec * sunE * cc_ndl * shadow, cc);
+        }
+
+        // Ambient
         float hemi = 0.5 + 0.5 * N.y;
         vec3 amb_up, amb_down;
-        if (ubo.misc.w > 1.5) {            // physical atmosphere
+        if (ubo.misc.w > 1.5) {
             amb_up   = physical_sky(vec3(0.0, 1.0, 0.0), L) * 0.8;
             amb_down = physical_sky(normalize(vec3(L.x, 0.05, L.z)), L) * 0.2;
-        } else if (ubo.misc.w > 0.5) {     // gradient sky
+        } else if (ubo.misc.w > 0.5) {
             amb_up   = ubo.sky_top.rgb * 0.6;
             amb_down = ubo.sky_bottom.rgb * 0.25;
-        } else {                           // solid background: neutral studio
+        } else {
             amb_up   = sunE * 0.08 + vec3(0.05);
             amb_down = vec3(0.03);
         }

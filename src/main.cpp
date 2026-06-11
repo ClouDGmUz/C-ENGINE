@@ -137,6 +137,7 @@ static void undo_push(const std::vector<SceneObject> &objs, int sel) {
 /* ─── Key state tracking (for single-press detection) ─── */
 static bool g_key_d_was_pressed = false;
 static bool g_key_z_was_pressed = false;
+static bool g_lmb_was_down      = false;
 
 /* ─── Ray helpers ─── */
 static glm::vec3 screen_to_ray(double mx, double my, int w, int h, const glm::mat4 &view, const glm::mat4 &proj) {
@@ -196,6 +197,79 @@ static float ray_project_on_axis(glm::vec3 ro, glm::vec3 rd, glm::vec3 origin, g
     if (fabsf(denom) < 1e-6f) return 0.0f;
     float s = (b * d - a * e) / denom;
     return s; // parameter along axis from origin
+}
+
+static bool ray_aabb(glm::vec3 ro, glm::vec3 rd, glm::vec3 bmin, glm::vec3 bmax, float &t) {
+    float t0 = -1e30f, t1 = 1e30f;
+    for (int i = 0; i < 3; i++) {
+        float inv = 1.0f / rd[i]; // IEEE inf handles axis-parallel rays
+        float ta = (bmin[i] - ro[i]) * inv, tb = (bmax[i] - ro[i]) * inv;
+        if (ta > tb) { float tmp = ta; ta = tb; tb = tmp; }
+        if (ta > t0) t0 = ta;
+        if (tb < t1) t1 = tb;
+    }
+    if (t1 < t0 || t1 < 0.0f) return false;
+    t = t0 > 0.0f ? t0 : t1;
+    return true;
+}
+
+// Unit cylinder: radius 0.5, y in [-0.5, 0.5] — side wall and both caps
+static bool ray_cylinder_local(glm::vec3 ro, glm::vec3 rd, float &t) {
+    float best = 1e30f;
+    bool hit = false;
+    float a = rd.x * rd.x + rd.z * rd.z;
+    if (a > 1e-8f) {
+        float b = ro.x * rd.x + ro.z * rd.z;
+        float c = ro.x * ro.x + ro.z * ro.z - 0.25f;
+        float disc = b * b - a * c;
+        if (disc >= 0.0f) {
+            float sq = sqrtf(disc);
+            float ts[2] = { (-b - sq) / a, (-b + sq) / a };
+            for (int i = 0; i < 2; i++)
+                if (ts[i] > 0.0f && fabsf(ro.y + ts[i] * rd.y) <= 0.5f && ts[i] < best) { best = ts[i]; hit = true; }
+        }
+    }
+    if (fabsf(rd.y) > 1e-8f) {
+        float caps[2] = { 0.5f, -0.5f };
+        for (int i = 0; i < 2; i++) {
+            float tt = (caps[i] - ro.y) / rd.y;
+            glm::vec3 p = ro + rd * tt;
+            if (tt > 0.0f && p.x * p.x + p.z * p.z <= 0.25f && tt < best) { best = tt; hit = true; }
+        }
+    }
+    t = best;
+    return hit;
+}
+
+// Same transform order as the renderer — keep in sync with renderer_draw
+static glm::mat4 obj_model(const SceneObject &obj) {
+    glm::mat4 m = glm::translate(glm::mat4(1.0f), glm::vec3(obj.pos[0], obj.pos[1], obj.pos[2]));
+    m = glm::rotate(m, obj.rotation[1], glm::vec3(0, 1, 0));
+    m = glm::rotate(m, obj.rotation[0], glm::vec3(1, 0, 0));
+    m = glm::rotate(m, obj.rotation[2], glm::vec3(0, 0, 1));
+    m = glm::scale(m, glm::vec3(obj.scale));
+    return m;
+}
+
+// Blender-style precise pick: ray tested against the actual shape in object
+// space. Returns world-space hit distance, or -1 on miss.
+static float pick_object(const SceneObject &obj, glm::vec3 ro, glm::vec3 rd) {
+    glm::mat4 inv = glm::inverse(obj_model(obj));
+    glm::vec3 lro = glm::vec3(inv * glm::vec4(ro, 1.0f));
+    glm::vec3 lrd = glm::normalize(glm::vec3(inv * glm::vec4(rd, 0.0f)));
+
+    float t;
+    bool hit = false;
+    switch (obj.shape) {
+    case SHAPE_SPHERE:   hit = ray_sphere(lro, lrd, glm::vec3(0), 0.5f, t); break;
+    case SHAPE_CYLINDER: hit = ray_cylinder_local(lro, lrd, t);             break;
+    case SHAPE_PYRAMID:  // box is close enough for a pointy primitive
+    case SHAPE_CUBE:
+    default:             hit = ray_aabb(lro, lrd, glm::vec3(-0.5f), glm::vec3(0.5f), t); break;
+    }
+    if (!hit) return -1.0f;
+    glm::vec3 wp = glm::vec3(obj_model(obj) * glm::vec4(lro + lrd * t, 1.0f));
+    return glm::dot(wp - ro, rd);
 }
 
 // Intersect the pick ray with the plane through 'c' perpendicular to 'n'.
@@ -270,6 +344,9 @@ static SceneObject make_default_object(ShapeType shape) {
         obj.color[0] = 0.80f; obj.color[1] = 0.35f; obj.color[2] = 0.25f;
         obj.roughness = 0.55f; obj.metallic = 0.0f; break;
     }
+    obj.clearcoat = 0.0f; obj.clearcoat_roughness = 0.03f;
+    obj.sheen = 0.0f;
+    obj.tex_subtype = 0; obj.tex_param_a = 4.0f; obj.tex_param_b = 0.5f;
     return obj;
 }
 
@@ -398,8 +475,12 @@ int main(int argc, char **argv) {
             }
         }
 
-        // LMB press: start drag on gizmo or pick object
-        if (mouse_in_viewport && glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS && g_dragging == GIZMO_NONE) {
+        // LMB press edge: grab gizmo or pick object (single fire per click,
+        // not every held frame)
+        bool lmb_down = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+        bool lmb_clicked = lmb_down && !g_lmb_was_down;
+        g_lmb_was_down = lmb_down;
+        if (mouse_in_viewport && lmb_clicked && g_dragging == GIZMO_NONE) {
             if (g_hovered != GIZMO_NONE) {
                 g_dragging = g_hovered;
                 g_drag_start_pos = glm::vec3(objects[selected_obj].pos[0], objects[selected_obj].pos[1], objects[selected_obj].pos[2]);
@@ -416,18 +497,15 @@ int main(int argc, char **argv) {
                     g_drag_last_t = ray_project_on_axis(ray_origin, ray_dir, g_drag_start_pos, axis);
                 }
             } else {
-                // Pick object by ray-sphere intersection
+                // Blender-style: precise shape pick, nearest hit wins,
+                // clicking empty space deselects
                 float best_t = 1e30f;
                 int best_i = -1;
                 for (int i = 0; i < (int)objects.size(); i++) {
-                    glm::vec3 center(objects[i].pos[0], objects[i].pos[1], objects[i].pos[2]);
-                    float r = objects[i].scale * 0.5f;
-                    float t;
-                    if (ray_sphere(ray_origin, ray_dir, center, r, t) && t < best_t) {
-                        best_t = t; best_i = i;
-                    }
+                    float t = pick_object(objects[i], ray_origin, ray_dir);
+                    if (t >= 0.0f && t < best_t) { best_t = t; best_i = i; }
                 }
-                if (best_i >= 0) selected_obj = best_i;
+                selected_obj = best_i;
             }
         }
 
@@ -694,8 +772,46 @@ int main(int argc, char **argv) {
                 ImGui::ColorEdit3("Color", obj.color);
                 ImGui::SliderFloat("Roughness", &obj.roughness, 0.02f, 1.0f, "%.2f");
                 ImGui::SliderFloat("Metallic", &obj.metallic, 0.0f, 1.0f, "%.2f");
-                const char *tex_names[] = {"None", "Checker", "Brick", "Marble", "Wood"};
-                ImGui::Combo("Pattern", &obj.tex_mode, tex_names, 5);
+                ImGui::Spacing();
+                const char *tex_names[] = {"None", "Checker", "Brick", "Marble", "Wood",
+                    "Noise", "Voronoi", "Wave", "Gradient", "Musgrave"};
+                ImGui::Combo("Pattern", &obj.tex_mode, tex_names, 10);
+                // Show texture-specific params
+                if (obj.tex_mode == 5) {
+                    ImGui::SliderFloat("Detail", &obj.tex_param_a, 1.0f, 8.0f, "%.0f");
+                    ImGui::SliderFloat("Roughness##n", &obj.tex_param_b, 0.01f, 1.0f, "%.2f");
+                } else if (obj.tex_mode == 6) {
+                    const char *vfeat[] = {"F1", "F2", "Smooth F1"};
+                    const char *vdist[] = {"Euclidean", "Manhattan", "Chebychev", "Minkowski"};
+                    int feat = obj.tex_subtype % 10, dist = (obj.tex_subtype / 10) % 10;
+                    ImGui::Combo("Feature", &feat, vfeat, 3);
+                    ImGui::Combo("Distance", &dist, vdist, 4);
+                    obj.tex_subtype = feat + dist * 10;
+                    ImGui::SliderFloat("Smoothness", &obj.tex_param_a, 0.0f, 1.0f, "%.2f");
+                } else if (obj.tex_mode == 7) {
+                    const char *wtype[] = {"Bands", "Rings"};
+                    const char *wprof[] = {"Sine", "Sawtooth", "Triangle"};
+                    int wt = obj.tex_subtype % 10, wp = (obj.tex_subtype / 100) % 10;
+                    ImGui::Combo("Type", &wt, wtype, 2);
+                    ImGui::Combo("Profile", &wp, wprof, 3);
+                    obj.tex_subtype = wt + wp * 100;
+                    ImGui::SliderFloat("Distortion", &obj.tex_param_a, 0.0f, 1.0f, "%.2f");
+                    ImGui::SliderFloat("Detail##w", &obj.tex_param_b, 0.0f, 8.0f, "%.1f");
+                } else if (obj.tex_mode == 8) {
+                    const char *gtype[] = {"Linear", "Quadratic", "Easing", "Diagonal", "Radial", "Quad Sphere", "Spherical"};
+                    ImGui::Combo("Type##g", &obj.tex_subtype, gtype, 7);
+                } else if (obj.tex_mode == 9) {
+                    const char *mtype[] = {"FBM", "Multifractal", "Hetero Terrain", "Hybrid", "Ridged"};
+                    ImGui::Combo("Type##m", &obj.tex_subtype, mtype, 5);
+                    ImGui::SliderFloat("Detail##m", &obj.tex_param_a, 1.0f, 8.0f, "%.0f");
+                    ImGui::SliderFloat("Roughness##m", &obj.tex_param_b, 0.01f, 1.0f, "%.2f");
+                }
+                ImGui::Spacing();
+                ImGui::Text("Blender Principled Extras");
+                ImGui::SliderFloat("Clear Coat", &obj.clearcoat, 0.0f, 1.0f, "%.2f");
+                if (obj.clearcoat > 0.001f)
+                    ImGui::SliderFloat("Coat Roughness", &obj.clearcoat_roughness, 0.02f, 1.0f, "%.2f");
+                ImGui::SliderFloat("Sheen", &obj.sheen, 0.0f, 1.0f, "%.2f");
                 ImGui::Spacing();
             }
         }
