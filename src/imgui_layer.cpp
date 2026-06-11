@@ -38,10 +38,19 @@ static std::string find_asset(const char *rel) {
     return "";
 }
 
-/* Merge the Lucide icon font into the default font so ICON_LC_* strings
-   render inline. Icon glyphs live in the private-use area, no collisions. */
+/* UI font: Segoe UI when available (crisp, modern), ProggyClean fallback.
+   Lucide icon font merged on top so ICON_LC_* strings render inline. */
 static void load_fonts(ImGuiIO &io) {
-    io.Fonts->AddFontDefault();
+    bool ttf_loaded = false;
+#ifdef _WIN32
+    const char *ui_font = "C:\\Windows\\Fonts\\segoeui.ttf";
+    FILE *uf = fopen(ui_font, "rb");
+    if (uf) {
+        fclose(uf);
+        ttf_loaded = io.Fonts->AddFontFromFileTTF(ui_font, 17.0f) != nullptr;
+    }
+#endif
+    if (!ttf_loaded) io.Fonts->AddFontDefault();
 
     std::string path = find_asset("assets/lucide.ttf");
     if (path.empty()) { fprintf(stderr, "lucide.ttf not found, icons disabled\n"); return; }
@@ -50,16 +59,16 @@ static void load_fonts(ImGuiIO &io) {
     ImFontConfig cfg;
     cfg.MergeMode        = true;
     cfg.PixelSnapH       = true;
-    cfg.GlyphMinAdvanceX = 15.0f;                 // monospace-ish icon column
-    cfg.GlyphOffset      = ImVec2(0.0f, 2.5f);    // align with ProggyClean baseline
-    io.Fonts->AddFontFromFileTTF(path.c_str(), 14.0f, &cfg, ranges);
+    cfg.GlyphMinAdvanceX = 16.0f;                 // monospace-ish icon column
+    cfg.GlyphOffset      = ImVec2(0.0f, ttf_loaded ? 3.5f : 2.5f); // baseline align
+    io.Fonts->AddFontFromFileTTF(path.c_str(), ttf_loaded ? 15.0f : 14.0f, &cfg, ranges);
 }
 
 void imgui_init(GLFWwindow *window, const VkCtx &ctx) {
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO &io = ImGui::GetIO();
-    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    io.IniFilename = nullptr; // fixed panel layout — nothing worth persisting
     load_fonts(io);
 
     ImGui::StyleColorsDark();

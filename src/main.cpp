@@ -16,16 +16,78 @@
 #define WIDTH  1440
 #define HEIGHT 810
 
-/* ─── Default ImGui dark theme with minor polish ─── */
+/* ─── Modern dark theme: flat, desaturated, single blue accent ─── */
 static void apply_dark_theme() {
     ImGui::StyleColorsDark();
     ImGuiStyle &s = ImGui::GetStyle();
-    s.FrameRounding  = 4.0f;
-    s.GrabRounding   = 3.0f;
-    s.WindowRounding = 6.0f;
-    s.FramePadding   = ImVec2(6, 4);
-    s.ItemSpacing    = ImVec2(8, 6);
-    s.WindowPadding  = ImVec2(12, 10);
+    ImVec4 *c = s.Colors;
+
+    const ImVec4 bg       (0.082f, 0.090f, 0.108f, 1.00f); // panel base
+    const ImVec4 panel    (0.110f, 0.120f, 0.142f, 0.98f); // popups
+    const ImVec4 frame    (0.152f, 0.165f, 0.196f, 1.00f); // inputs/buttons
+    const ImVec4 frameHov (0.196f, 0.212f, 0.250f, 1.00f);
+    const ImVec4 frameAct (0.235f, 0.255f, 0.300f, 1.00f);
+    const ImVec4 accent   (0.310f, 0.550f, 1.000f, 1.00f);
+
+    c[ImGuiCol_Text]               = ImVec4(0.92f, 0.93f, 0.95f, 1.00f);
+    c[ImGuiCol_TextDisabled]       = ImVec4(0.45f, 0.47f, 0.53f, 1.00f);
+    c[ImGuiCol_WindowBg]           = bg;
+    c[ImGuiCol_ChildBg]            = ImVec4(0, 0, 0, 0);
+    c[ImGuiCol_PopupBg]            = panel;
+    c[ImGuiCol_Border]             = ImVec4(1.0f, 1.0f, 1.0f, 0.06f);
+    c[ImGuiCol_BorderShadow]       = ImVec4(0, 0, 0, 0);
+    c[ImGuiCol_FrameBg]            = frame;
+    c[ImGuiCol_FrameBgHovered]     = frameHov;
+    c[ImGuiCol_FrameBgActive]      = frameAct;
+    c[ImGuiCol_TitleBg]            = bg;
+    c[ImGuiCol_TitleBgActive]      = bg;
+    c[ImGuiCol_TitleBgCollapsed]   = bg;
+    c[ImGuiCol_MenuBarBg]          = bg;
+    c[ImGuiCol_ScrollbarBg]        = ImVec4(0, 0, 0, 0);
+    c[ImGuiCol_ScrollbarGrab]      = frame;
+    c[ImGuiCol_ScrollbarGrabHovered] = frameHov;
+    c[ImGuiCol_ScrollbarGrabActive]  = frameAct;
+    c[ImGuiCol_CheckMark]          = accent;
+    c[ImGuiCol_SliderGrab]         = accent;
+    c[ImGuiCol_SliderGrabActive]   = ImVec4(0.45f, 0.65f, 1.0f, 1.0f);
+    c[ImGuiCol_Button]             = frame;
+    c[ImGuiCol_ButtonHovered]      = frameHov;
+    c[ImGuiCol_ButtonActive]       = ImVec4(0.26f, 0.44f, 0.78f, 1.0f);
+    c[ImGuiCol_Header]             = ImVec4(0.31f, 0.55f, 1.0f, 0.14f); // CollapsingHeader
+    c[ImGuiCol_HeaderHovered]      = ImVec4(0.31f, 0.55f, 1.0f, 0.24f);
+    c[ImGuiCol_HeaderActive]       = ImVec4(0.31f, 0.55f, 1.0f, 0.32f);
+    c[ImGuiCol_Separator]          = ImVec4(1.0f, 1.0f, 1.0f, 0.08f);
+    c[ImGuiCol_SeparatorHovered]   = ImVec4(0.31f, 0.55f, 1.0f, 0.50f);
+    c[ImGuiCol_SeparatorActive]    = accent;
+    c[ImGuiCol_ResizeGrip]         = ImVec4(0.31f, 0.55f, 1.0f, 0.15f);
+    c[ImGuiCol_ResizeGripHovered]  = ImVec4(0.31f, 0.55f, 1.0f, 0.45f);
+    c[ImGuiCol_ResizeGripActive]   = accent;
+    c[ImGuiCol_Tab]                = frame;
+    c[ImGuiCol_TabHovered]         = frameHov;
+    c[ImGuiCol_TabSelected]        = ImVec4(0.26f, 0.44f, 0.78f, 1.0f);
+    c[ImGuiCol_TextSelectedBg]     = ImVec4(0.31f, 0.55f, 1.0f, 0.30f);
+    c[ImGuiCol_NavCursor]          = accent;
+    c[ImGuiCol_DragDropTarget]     = accent;
+    c[ImGuiCol_ModalWindowDimBg]   = ImVec4(0, 0, 0, 0.55f);
+
+    s.WindowRounding    = 0.0f;   // side panels sit flush with the window
+    s.ChildRounding     = 8.0f;
+    s.FrameRounding     = 6.0f;
+    s.PopupRounding     = 8.0f;
+    s.GrabRounding      = 12.0f;  // pill sliders
+    s.ScrollbarRounding = 12.0f;
+    s.TabRounding       = 6.0f;
+    s.WindowPadding     = ImVec2(14, 12);
+    s.FramePadding      = ImVec2(10, 6);
+    s.ItemSpacing       = ImVec2(8, 7);
+    s.ItemInnerSpacing  = ImVec2(8, 6);
+    s.IndentSpacing     = 18.0f;
+    s.ScrollbarSize     = 11.0f;
+    s.GrabMinSize       = 10.0f;
+    s.WindowBorderSize  = 0.0f;
+    s.ChildBorderSize   = 1.0f;
+    s.PopupBorderSize   = 1.0f;
+    s.FrameBorderSize   = 0.0f;
 }
 
 /* ─── Camera ─── */
@@ -78,7 +140,10 @@ static bool g_key_z_was_pressed = false;
 /* ─── Ray helpers ─── */
 static glm::vec3 screen_to_ray(double mx, double my, int w, int h, const glm::mat4 &view, const glm::mat4 &proj) {
     float x = (2.0f * (float)mx / w - 1.0f);
-    float y = (1.0f - 2.0f * (float)my / h); // flip Y for Vulkan
+    // No manual Y flip: proj already has [1][1] negated for Vulkan, so the
+    // inverse un-flips. Flipping here too mirrored the pick ray vertically —
+    // the clickable gizmo was a ghost reflected around the screen center.
+    float y = (2.0f * (float)my / h - 1.0f);
     glm::vec4 clip(x, y, -1.0f, 1.0f);
     glm::vec4 eye = glm::inverse(proj) * clip;
     eye = glm::vec4(eye.x, eye.y, -1.0f, 0.0f);
@@ -243,8 +308,8 @@ int main(int argc, char **argv) {
     }
 
     double last_time = glfwGetTime();
-    const float LEFT_W = 220.0f;
-    const float RIGHT_W = 300.0f;
+    const float LEFT_W = 240.0f;
+    const float RIGHT_W = 330.0f;
 
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
@@ -483,15 +548,15 @@ int main(int argc, char **argv) {
         bool scale_sel  = (g_tool == TOOL_SCALE);
         bool rotate_sel = (g_tool == TOOL_ROTATE);
 
-        if (move_sel) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.3f, 0.5f, 0.8f, 1.0f));
+        if (move_sel) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.26f, 0.44f, 0.78f, 1.0f));
         if (ImGui::Button(ICON_LC_MOVE "  Move (G)", ImVec2(-1, 0))) g_tool = TOOL_MOVE;
         if (move_sel) ImGui::PopStyleColor();
 
-        if (scale_sel) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.3f, 0.5f, 0.8f, 1.0f));
+        if (scale_sel) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.26f, 0.44f, 0.78f, 1.0f));
         if (ImGui::Button(ICON_LC_SCALE_3D "  Scale (S)", ImVec2(-1, 0))) g_tool = TOOL_SCALE;
         if (scale_sel) ImGui::PopStyleColor();
 
-        if (rotate_sel) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.3f, 0.5f, 0.8f, 1.0f));
+        if (rotate_sel) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.26f, 0.44f, 0.78f, 1.0f));
         if (ImGui::Button(ICON_LC_ROTATE_3D "  Rotate (R)", ImVec2(-1, 0))) g_tool = TOOL_ROTATE;
         if (rotate_sel) ImGui::PopStyleColor();
 
