@@ -1,9 +1,41 @@
 #include "imgui_layer.h"
 #include "IconsLucide.h"
 #include <cstdio>
+#include <string>
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#endif
 
 static void check_vk(VkResult r) {
     if (r != VK_SUCCESS) { fprintf(stderr, "ImGui Vulkan error: %d\n", r); }
+}
+
+/* Resolve an asset path independent of the working directory: try the cwd,
+   then the exe directory, then up out of build/<config>/ to the repo root. */
+static std::string find_asset(const char *rel) {
+    std::string bases[4];
+    int n = 0;
+    bases[n++] = "";
+#ifdef _WIN32
+    char buf[MAX_PATH];
+    DWORD len = GetModuleFileNameA(nullptr, buf, MAX_PATH);
+    if (len > 0 && len < MAX_PATH) {
+        std::string dir(buf);
+        dir.resize(dir.find_last_of("\\/") + 1);
+        bases[n++] = dir;             // assets copied next to the exe
+        bases[n++] = dir + "..\\..\\"; // build/<config>/ -> repo root
+        bases[n++] = dir + "..\\";
+    }
+#endif
+    for (int i = 0; i < n; i++) {
+        std::string p = bases[i] + rel;
+        FILE *f = fopen(p.c_str(), "rb");
+        if (f) { fclose(f); return p; }
+    }
+    return "";
 }
 
 /* Merge the Lucide icon font into the default font so ICON_LC_* strings
@@ -11,10 +43,8 @@ static void check_vk(VkResult r) {
 static void load_fonts(ImGuiIO &io) {
     io.Fonts->AddFontDefault();
 
-    const char *path = "assets/lucide.ttf";
-    FILE *f = fopen(path, "rb");
-    if (!f) { fprintf(stderr, "lucide.ttf not found, icons disabled\n"); return; }
-    fclose(f);
+    std::string path = find_asset("assets/lucide.ttf");
+    if (path.empty()) { fprintf(stderr, "lucide.ttf not found, icons disabled\n"); return; }
 
     static const ImWchar ranges[] = { ICON_MIN_LC, ICON_MAX_LC, 0 };
     ImFontConfig cfg;
@@ -22,7 +52,7 @@ static void load_fonts(ImGuiIO &io) {
     cfg.PixelSnapH       = true;
     cfg.GlyphMinAdvanceX = 15.0f;                 // monospace-ish icon column
     cfg.GlyphOffset      = ImVec2(0.0f, 2.5f);    // align with ProggyClean baseline
-    io.Fonts->AddFontFromFileTTF(path, 14.0f, &cfg, ranges);
+    io.Fonts->AddFontFromFileTTF(path.c_str(), 14.0f, &cfg, ranges);
 }
 
 void imgui_init(GLFWwindow *window, const VkCtx &ctx) {

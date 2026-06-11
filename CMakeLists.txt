@@ -118,3 +118,9 @@ target_compile_definitions(glfw_vulkan PRIVATE
 )
 target_link_libraries(glfw_vulkan PRIVATE glfw glm::glm)
 add_dependencies(glfw_vulkan shaders)
+
+# Runtime assets (icon font) next to the exe so it runs from any directory
+add_custom_command(TARGET glfw_vulkan POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            ${CMAKE_SOURCE_DIR}/assets $<TARGET_FILE_DIR:glfw_vulkan>/assets
+)
