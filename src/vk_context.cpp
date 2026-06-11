@@ -74,9 +74,20 @@ static void create_instance(VkCtx &ctx) {
     ci.ppEnabledExtensionNames = glfw_exts;
 
 #ifndef NDEBUG
+    uint32_t layer_count = 0;
+    vkEnumerateInstanceLayerProperties(&layer_count, nullptr);
+    auto *layers_avail = (VkLayerProperties *)malloc(layer_count * sizeof(VkLayerProperties));
+    vkEnumerateInstanceLayerProperties(&layer_count, layers_avail);
+    bool has_validation = false;
+    for (uint32_t i = 0; i < layer_count; i++)
+        if (strcmp(layers_avail[i].layerName, "VK_LAYER_KHRONOS_validation") == 0)
+            has_validation = true;
+    free(layers_avail);
     const char *layers[] = { "VK_LAYER_KHRONOS_validation" };
-    ci.enabledLayerCount   = 1;
-    ci.ppEnabledLayerNames = layers;
+    if (has_validation) {
+        ci.enabledLayerCount   = 1;
+        ci.ppEnabledLayerNames = layers;
+    }
 #endif
 
     vk_check(vkCreateInstance(&ci, nullptr, &ctx.instance), "create instance");
@@ -172,9 +183,12 @@ static void create_swapchain(VkCtx &ctx) {
     auto *formats = (VkSurfaceFormatKHR *)malloc(fmt_count * sizeof(VkSurfaceFormatKHR));
     vkGetPhysicalDeviceSurfaceFormatsKHR(ctx.physical_device, ctx.surface, &fmt_count, formats);
 
+    /* UNORM, not SRGB: shaders already gamma-correct manually and ImGui
+       writes sRGB-space colors directly. An SRGB swapchain would encode
+       a second time and wash the whole image out. */
     VkSurfaceFormatKHR chosen = formats[0];
     for (uint32_t i = 0; i < fmt_count; i++) {
-        if (formats[i].format == VK_FORMAT_B8G8R8A8_SRGB &&
+        if (formats[i].format == VK_FORMAT_B8G8R8A8_UNORM &&
             formats[i].colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
             chosen = formats[i];
     }
@@ -267,11 +281,29 @@ static void create_render_pass(VkCtx &ctx) {
     subpass.pColorAttachments       = &color_ref;
     subpass.pDepthStencilAttachment = &depth_ref;
 
+    /* The depth image is shared by all in-flight frames; the previous frame's
+       depth writes must finish before this frame's loadOp clear. Color side
+       orders the clear against the acquire-semaphore wait stage. */
+    VkSubpassDependency dep = {};
+    dep.srcSubpass      = VK_SUBPASS_EXTERNAL;
+    dep.dstSubpass      = 0;
+    dep.srcStageMask    = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                          VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                          VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+    dep.srcAccessMask   = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    dep.dstStageMask    = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                          VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                          VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+    dep.dstAccessMask   = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                          VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+
     VkRenderPassCreateInfo ci = { VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO };
     ci.attachmentCount = 2;
     ci.pAttachments    = attachments;
     ci.subpassCount    = 1;
     ci.pSubpasses      = &subpass;
+    ci.dependencyCount = 1;
+    ci.pDependencies   = &dep;
 
     vk_check(vkCreateRenderPass(ctx.device, &ci, nullptr, &ctx.render_pass), "create render pass");
 }
@@ -299,25 +331,31 @@ static void create_commands(VkCtx &ctx) {
     pci.flags            = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
     vk_check(vkCreateCommandPool(ctx.device, &pci, nullptr, &ctx.command_pool), "create command pool");
 
-    ctx.command_buffers.resize(ctx.swapchain_count);
     VkCommandBufferAllocateInfo ai = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
     ai.commandPool        = ctx.command_pool;
     ai.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    ai.commandBufferCount = ctx.swapchain_count;
-    vk_check(vkAllocateCommandBuffers(ctx.device, &ai, ctx.command_buffers.data()), "allocate command buffers");
+    ai.commandBufferCount = MAX_FRAMES_IN_FLIGHT;
+    vk_check(vkAllocateCommandBuffers(ctx.device, &ai, ctx.command_buffers), "allocate command buffers");
 }
 
 /* --- sync objects --- */
+static void create_render_finished_semaphores(VkCtx &ctx) {
+    VkSemaphoreCreateInfo si = { VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
+    ctx.render_finished.resize(ctx.swapchain_count);
+    for (uint32_t i = 0; i < ctx.swapchain_count; i++)
+        vk_check(vkCreateSemaphore(ctx.device, &si, nullptr, &ctx.render_finished[i]), "create semaphore");
+}
+
 static void create_sync(VkCtx &ctx) {
     VkSemaphoreCreateInfo si = { VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
     VkFenceCreateInfo     fi = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
     fi.flags = VK_FENCE_CREATE_SIGNALED_BIT;
 
     for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-        vk_check(vkCreateSemaphore(ctx.device, &si, nullptr, &ctx.image_available[i]),  "create semaphore");
-        vk_check(vkCreateSemaphore(ctx.device, &si, nullptr, &ctx.render_finished[i]), "create semaphore");
+        vk_check(vkCreateSemaphore(ctx.device, &si, nullptr, &ctx.image_available[i]), "create semaphore");
         vk_check(vkCreateFence(ctx.device, &fi, nullptr, &ctx.in_flight[i]),          "create fence");
     }
+    create_render_finished_semaphores(ctx);
 }
 
 /* --- swapchain recreation --- */
@@ -340,15 +378,10 @@ static void recreate_swapchain(VkCtx &ctx) {
     create_depth_resources(ctx);
     create_framebuffers(ctx);
 
-    vkFreeCommandBuffers(ctx.device, ctx.command_pool,
-        (uint32_t)ctx.command_buffers.size(), ctx.command_buffers.data());
-    ctx.command_buffers.clear();
-    ctx.command_buffers.resize(ctx.swapchain_count);
-    VkCommandBufferAllocateInfo ai = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
-    ai.commandPool        = ctx.command_pool;
-    ai.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    ai.commandBufferCount = ctx.swapchain_count;
-    vk_check(vkAllocateCommandBuffers(ctx.device, &ai, ctx.command_buffers.data()), "re-allocate command buffers");
+    /* per-image semaphores: count may have changed, and old ones may be
+       left signaled by retired presents — recreate (device is idle here) */
+    for (auto s : ctx.render_finished) vkDestroySemaphore(ctx.device, s, nullptr);
+    create_render_finished_semaphores(ctx);
 }
 
 /* --- public API --- */
@@ -374,9 +407,10 @@ void vk_shutdown(VkCtx &ctx) {
 
     for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         vkDestroySemaphore(ctx.device, ctx.image_available[i], nullptr);
-        vkDestroySemaphore(ctx.device, ctx.render_finished[i], nullptr);
         vkDestroyFence(ctx.device, ctx.in_flight[i], nullptr);
     }
+    for (auto s : ctx.render_finished) vkDestroySemaphore(ctx.device, s, nullptr);
+    ctx.render_finished.clear();
     vkDestroyCommandPool(ctx.device, ctx.command_pool, nullptr);
     cleanup_swapchain(ctx);
     vkDestroyRenderPass(ctx.device, ctx.render_pass, nullptr);
@@ -394,23 +428,27 @@ bool vk_begin_frame(VkCtx &ctx, GLFWwindow *window, uint32_t &out_image_index) {
 
     VkResult r = vkAcquireNextImageKHR(ctx.device, ctx.swapchain, UINT64_MAX,
         ctx.image_available[ctx.frame_index], VK_NULL_HANDLE, &out_image_index);
-    if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) {
+    if (r == VK_ERROR_OUT_OF_DATE_KHR) {
+        // Nothing acquired, semaphore not signaled — safe to bail and recreate.
         recreate_swapchain(ctx);
         return false;
     }
-    vk_check(r, "acquire next image");
+    // SUBOPTIMAL means the image WAS acquired and the semaphore WAS signaled;
+    // bailing here would leave it signaled. Render this frame, recreate after present.
+    if (r != VK_SUBOPTIMAL_KHR)
+        vk_check(r, "acquire next image");
 
     vkResetFences(ctx.device, 1, &ctx.in_flight[ctx.frame_index]);
 
-    vkResetCommandBuffer(ctx.command_buffers[out_image_index], 0);
+    vkResetCommandBuffer(ctx.command_buffers[ctx.frame_index], 0);
 
     VkCommandBufferBeginInfo bi = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
-    vkBeginCommandBuffer(ctx.command_buffers[out_image_index], &bi);
+    vkBeginCommandBuffer(ctx.command_buffers[ctx.frame_index], &bi);
     return true;
 }
 
 void vk_end_frame(VkCtx &ctx, uint32_t image_index) {
-    vkEndCommandBuffer(ctx.command_buffers[image_index]);
+    vkEndCommandBuffer(ctx.command_buffers[ctx.frame_index]);
 
     VkPipelineStageFlags wait_stages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
     VkSubmitInfo si = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
@@ -418,15 +456,15 @@ void vk_end_frame(VkCtx &ctx, uint32_t image_index) {
     si.pWaitSemaphores      = &ctx.image_available[ctx.frame_index];
     si.pWaitDstStageMask    = wait_stages;
     si.commandBufferCount   = 1;
-    si.pCommandBuffers      = &ctx.command_buffers[image_index];
+    si.pCommandBuffers      = &ctx.command_buffers[ctx.frame_index];
     si.signalSemaphoreCount = 1;
-    si.pSignalSemaphores    = &ctx.render_finished[ctx.frame_index];
+    si.pSignalSemaphores    = &ctx.render_finished[image_index];
 
     vk_check(vkQueueSubmit(ctx.graphics_queue, 1, &si, ctx.in_flight[ctx.frame_index]), "queue submit");
 
     VkPresentInfoKHR pi = { VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
     pi.waitSemaphoreCount = 1;
-    pi.pWaitSemaphores    = &ctx.render_finished[ctx.frame_index];
+    pi.pWaitSemaphores    = &ctx.render_finished[image_index];
     pi.swapchainCount     = 1;
     pi.pSwapchains        = &ctx.swapchain;
     pi.pImageIndices      = &image_index;

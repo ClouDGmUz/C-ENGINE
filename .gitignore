@@ -3,6 +3,11 @@ out.txt
 err.txt
 debug.log
 imgui.ini
+smoke_out.txt
+smoke_err.txt
+shot*.png
+diag*.png
+Engine/.obsidian/
 *.exe
 *.pdb
 *.obj

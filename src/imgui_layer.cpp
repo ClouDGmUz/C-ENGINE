@@ -1,8 +1,28 @@
 #include "imgui_layer.h"
+#include "IconsLucide.h"
 #include <cstdio>
 
 static void check_vk(VkResult r) {
     if (r != VK_SUCCESS) { fprintf(stderr, "ImGui Vulkan error: %d\n", r); }
+}
+
+/* Merge the Lucide icon font into the default font so ICON_LC_* strings
+   render inline. Icon glyphs live in the private-use area, no collisions. */
+static void load_fonts(ImGuiIO &io) {
+    io.Fonts->AddFontDefault();
+
+    const char *path = "assets/lucide.ttf";
+    FILE *f = fopen(path, "rb");
+    if (!f) { fprintf(stderr, "lucide.ttf not found, icons disabled\n"); return; }
+    fclose(f);
+
+    static const ImWchar ranges[] = { ICON_MIN_LC, ICON_MAX_LC, 0 };
+    ImFontConfig cfg;
+    cfg.MergeMode        = true;
+    cfg.PixelSnapH       = true;
+    cfg.GlyphMinAdvanceX = 15.0f;                 // monospace-ish icon column
+    cfg.GlyphOffset      = ImVec2(0.0f, 2.5f);    // align with ProggyClean baseline
+    io.Fonts->AddFontFromFileTTF(path, 14.0f, &cfg, ranges);
 }
 
 void imgui_init(GLFWwindow *window, const VkCtx &ctx) {
@@ -10,6 +30,7 @@ void imgui_init(GLFWwindow *window, const VkCtx &ctx) {
     ImGui::CreateContext();
     ImGuiIO &io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    load_fonts(io);
 
     ImGui::StyleColorsDark();
 

@@ -28,9 +28,11 @@ struct VkCtx {
     VkRenderPass     render_pass;
     std::vector<VkFramebuffer> framebuffers;
     VkCommandPool    command_pool;
-    std::vector<VkCommandBuffer> command_buffers;
+    /* one command buffer per in-flight frame — guarded by that frame's fence */
+    VkCommandBuffer  command_buffers[MAX_FRAMES_IN_FLIGHT];
     VkSemaphore      image_available[MAX_FRAMES_IN_FLIGHT];
-    VkSemaphore      render_finished[MAX_FRAMES_IN_FLIGHT];
+    /* one per swapchain image — present-wait semaphore can't be tied to frame slot */
+    std::vector<VkSemaphore> render_finished;
     VkFence          in_flight[MAX_FRAMES_IN_FLIGHT];
     uint32_t         frame_index;
 };

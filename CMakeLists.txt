@@ -93,6 +93,7 @@ add_executable(glfw_vulkan
     src/vk_context.cpp
     src/imgui_layer.cpp
     src/renderer.cpp
+
     ${volk_SOURCE_DIR}/volk.c
     ${imgui_SOURCE_DIR}/imgui.cpp
     ${imgui_SOURCE_DIR}/imgui_draw.cpp
@@ -111,6 +112,9 @@ target_include_directories(glfw_vulkan PRIVATE
     ${imgui_SOURCE_DIR}
     ${imgui_SOURCE_DIR}/backends
 )
-target_compile_definitions(glfw_vulkan PRIVATE IMGUI_IMPL_VULKAN_USE_VOLK)
+target_compile_definitions(glfw_vulkan PRIVATE
+    IMGUI_IMPL_VULKAN_USE_VOLK
+    GLM_FORCE_DEPTH_ZERO_TO_ONE # Vulkan clip space, needed for ortho/perspective
+)
 target_link_libraries(glfw_vulkan PRIVATE glfw glm::glm)
 add_dependencies(glfw_vulkan shaders)
